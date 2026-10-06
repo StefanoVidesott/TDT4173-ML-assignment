@@ -1,0 +1,12 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: ..
+command: >-
+  mkdir -p outputs && cp azure/pseudo/*.npy outputs/ &&
+  PREDS_DIR=./outputs python src/train_gbm.py --name pseudo_dev --folds 2,3 --sub 0.2 --lr 0.1
+  --no-future-vol --no-cross --pseudo gbm_v2,gbm_v3,gbm_v4 --pseudo-w 1.0
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04
+  conda_file: env.yml
+compute: azureml:cpu8
+experiment_name: sintef-uc
+display_name: pseudo_dev

@@ -1,8 +1,9 @@
 """Long-format features: one row per (case, unit, hour)."""
 import numpy as np
 import pandas as pd
+import yaml
 
-from data import H, RESERVOIRS, UNIT_TOPO, load_cases, topology
+from data import DATA, H, RESERVOIRS, UNIT_TOPO, load_cases, topology
 
 
 def _rank(x, axis=-1):
@@ -14,6 +15,17 @@ def _roll(x, w):
     pad = np.pad(x, [(0, 0)] * (x.ndim - 1) + [(w // 2, w - 1 - w // 2)], mode="edge")
     c = np.cumsum(np.pad(pad, [(0, 0)] * (x.ndim - 1) + [(1, 0)]), axis=-1)
     return (c[..., w:] - c[..., :-w]) / w
+
+
+def turbine_qmax():
+    """Max discharge (m3/s) per generator = largest flow on its turbine efficiency curves."""
+    d = yaml.safe_load(open(DATA / "extended" / "Tokke_Vinje_topology.yaml"))["model"]["generator"]
+    out = {}
+    for g, v in d.items():
+        curves = v["turb_eff_curves"]
+        curves = curves if isinstance(curves, list) else [curves]
+        out[g] = float(max(max(c["x"]) for c in curves))
+    return out
 
 
 def _segments(b):
@@ -29,7 +41,7 @@ def _segments(b):
     return (sign * length).astype(np.float32), pos.astype(np.float32), (length - pos - 1).astype(np.float32)
 
 
-def build(use_future_vol=True):
+def build(use_future_vol=True, cross_plant=True):
     a = load_cases()
     n = len(a["price"])
     units = list(a["units"])
@@ -167,6 +179,52 @@ def build(use_future_vol=True):
     if not use_future_vol:
         for k in ["up_dvol", "dn_dvol", "up_dvol_infl"]:
             del uf[k]
+
+    # ---------- water balance: how fast reservoirs fill/drain (decisive when prices are flat) ----------
+    qmax = turbine_qmax()
+    plant_q = {}
+    for u in units:
+        plant_q[u.rsplit("_", 1)[0]] = plant_q.get(u.rsplit("_", 1)[0], 0.0) + qmax[u]
+    feeders = {}                                       # reservoir -> plants discharging into it
+    for plant, (_, dn) in UNIT_TOPO.items():
+        if dn:
+            feeders.setdefault(dn, []).append(plant)
+    m3h = 3600 / 1e6                                   # m3/s for one hour -> Mm3
+    for name in ["up_fill_t", "up_fill_feed_t", "dn_fill_t", "dn_fill_feed_t", "up_hours_to_full",
+                 "up_drain_hours", "dn_room_hours", "feed_q_rel"]:
+        shape = (n, U, H) if name.endswith("_t") else (n, U)
+        (uh if name.endswith("_t") else uf)[name] = np.zeros(shape, np.float32)
+    cum_t = np.arange(1, H + 1, dtype=np.float32)[None, :]
+    for k, u in enumerate(units):
+        plant = u.rsplit("_", 1)[0]
+        up, dn = UNIT_TOPO[plant]
+        iu = [ri[r] for r in up]
+        v0, vm = vol[:, iu, 0].sum(1), vmax[iu].sum()
+        nat = np.cumsum(infl[:, [infl_names.index(r) for r in up]].sum(1), 1) * m3h      # n,H Mm3
+        feed_q = sum(plant_q[p] for r in up for p in feeders.get(r, []))
+        uh["up_fill_t"][:, k] = (v0[:, None] + nat) / vm
+        uh["up_fill_feed_t"][:, k] = (v0[:, None] + nat + feed_q * m3h * cum_t) / vm
+        rate = nat[:, -1] / H + 1e-4
+        uf["up_hours_to_full"][:, k] = np.clip((vm - v0) / rate, 0, 2000)
+        uf["up_drain_hours"][:, k] = np.clip(v0 / (plant_q[plant] * m3h), 0, 5000)
+        uf["feed_q_rel"][:, k] = feed_q / plant_q[plant]
+        if dn:
+            j = ri[dn]
+            dnat = np.cumsum(infl[:, infl_names.index(dn)], 1) * m3h
+            dfeed = sum(plant_q[p] for p in feeders.get(dn, []))
+            uh["dn_fill_t"][:, k] = (vol[:, j, 0][:, None] + dnat) / vmax[j]
+            uh["dn_fill_feed_t"][:, k] = (vol[:, j, 0][:, None] + dnat + dfeed * m3h * cum_t) / vmax[j]
+            uf["dn_room_hours"][:, k] = np.clip((vmax[j] - vol[:, j, 0]) / (dfeed * m3h), 0, 5000)
+
+    # every plant's economics at hour t, visible to every unit (plants are coupled through the watercourse)
+    first_unit = {}
+    for k, u in enumerate(units):
+        first_unit.setdefault(u.rsplit("_", 1)[0], k)
+    for plant, k in (first_unit.items() if cross_plant else []):
+        tag = plant.replace(" ", "")
+        hour[f"pl_{tag}_ratio"] = uh["p_over_upwv"][:, k]
+        hour[f"pl_{tag}_seg"] = uh["seg_up_len"][:, k]
+        case[f"pl_{tag}_frac"] = uf["frac_up_100"][:, k]
 
     # ---------- assemble long frame ----------
     N = n * U * H

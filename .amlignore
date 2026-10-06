@@ -1,0 +1,11 @@
+.venv/
+.git/
+cache/
+preds/
+submissions/
+azure/outputs/
+*.pdf
+*.ipynb
+.DS_Store
+__pycache__/
+logs_*.txt
