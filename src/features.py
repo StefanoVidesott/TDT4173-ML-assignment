@@ -41,7 +41,20 @@ def _segments(b):
     return (sign * length).astype(np.float32), pos.astype(np.float32), (length - pos - 1).astype(np.float32)
 
 
-def build(use_future_vol=True, cross_plant=True):
+def _shift(x, s):
+    """x[:, t+s] with edge padding (s>0: future, s<0: past)."""
+    idx = np.clip(np.arange(x.shape[1]) + s, 0, x.shape[1] - 1)
+    return x[:, idx]
+
+
+def _window(x, w, forward):
+    """Max and min of x over the next (forward) or previous w hours, excluding t; edge padded."""
+    shifts = range(1, w + 1) if forward else range(-w, 0)
+    st = np.stack([_shift(x, s) for s in shifts])
+    return st.max(0), st.min(0)
+
+
+def build(use_future_vol=True, cross_plant=True, context=False):
     a = load_cases()
     n = len(a["price"])
     units = list(a["units"])
@@ -124,7 +137,9 @@ def build(use_future_vol=True, cross_plant=True):
     uh = {k: np.zeros((n, U, H), np.float32) for k in [
         "p_m_wvdiff", "p_m_wvdiff_z", "p_over_wvdiff", "up_infl_t", "p_over_upwv", "rank_m_need",
         "rank_m_need_up", "p_over_upwv0", "p_over_upwv_daymax",
-        "seg_up_len", "seg_up_pos", "seg_up_rem", "seg_df_len", "seg_df_pos", "seg_df_rem"]}
+        "seg_up_len", "seg_up_pos", "seg_up_rem", "seg_df_len", "seg_df_pos", "seg_df_rem"]
+        + ([f"ratio_{d}{s}" for d in ("lag", "lead") for s in (1, 2, 3, 6, 12, 24)]
+           + [f"ratio_{d}{w}" for d in ("fmax", "fmin", "bmax", "bmin") for w in (6, 12)] if context else [])}
     rank_w = hour["price_rank_w"]
     plant_units = {}
     for u in units:
@@ -171,6 +186,13 @@ def build(use_future_vol=True, cross_plant=True):
         # run lengths: start/stop costs make short spikes above (or dips below) the threshold not worth acting on
         (uh["seg_up_len"][:, k], uh["seg_up_pos"][:, k], uh["seg_up_rem"][:, k]) = _segments(ratio > 1)
         (uh["seg_df_len"][:, k], uh["seg_df_pos"][:, k], uh["seg_df_rem"][:, k]) = _segments(P > thr)
+        if context:
+            for s in (1, 2, 3, 6, 12, 24):
+                uh[f"ratio_lag{s}"][:, k] = _shift(ratio, -s)
+                uh[f"ratio_lead{s}"][:, k] = _shift(ratio, s)
+            for w in (6, 12):
+                uh[f"ratio_fmax{w}"][:, k], uh[f"ratio_fmin{w}"][:, k] = _window(ratio, w, forward=True)
+                uh[f"ratio_bmax{w}"][:, k], uh[f"ratio_bmin{w}"][:, k] = _window(ratio, w, forward=False)
         if use_future_vol:
             uf["up_dvol"][:, k] = (vol[:, iu, 7].sum(1) - vol[:, iu, 0].sum(1)) / uvm
             uf["dn_dvol"][:, k] = (vol[:, ri[dn], 7] - vol[:, ri[dn], 0]) / vmax[ri[dn]] if dn else 0

@@ -8,3 +8,8 @@ azure/outputs/
 azure/pseudo/
 submissions/
 *.npy
+report/*.aux
+report/*.log
+report/*.fls
+report/*.fdb_latexmk
+report/*.out
