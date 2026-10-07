@@ -30,7 +30,7 @@ tr = a["is_train"]
 y = a["y"]
 units = [u.replace("_", " ") for u in a["units"]]
 L = lambda p: np.log(np.clip(p, 1e-6, 1 - 1e-6) / (1 - np.clip(p, 1e-6, 1 - 1e-6)))
-W = {"gbm_v2": .4, "gbm_v3": .1, "gbm_v4": .3, "gbm_v5": .2}
+W = {"gbm_v2": .3, "gbm_v7": .15, "gbm_v8": .1, "gbm_v9": .05, "xgb_v1": .15, "xgb_v2": .25}
 blend = sum(w * L(np.load(ROOT / "preds" / f"{m}_oof.npy")) for m, w in W.items())
 
 # 1) EDA: weekly behaviour of each unit (all-off / mixed / all-on)
@@ -93,21 +93,22 @@ fig.savefig(OUT / "auc_breakdown.pdf")
 plt.close(fig)
 
 # 4) Learning progress: CV (OOF) vs Kaggle public score
-steps = ["unit prior", "GBM v1", "GBM v2", "blend v2+v4", "blend v2-v5"]
-cv = [0.6167, 0.9716, 0.9826, 0.9842, 0.9844]
-kag = [np.nan, np.nan, 0.98881, 0.99045, 0.99043]
-fig, ax = plt.subplots(figsize=(4.6, 2.4))
+steps = ["unit prior", "GBM v1", "GBM v2", "blend v2+v4", "+ v6 (topo)", "+ v7, v8", "+ v9, XGB v1",
+         "+ XGB v2"]
+cv = [0.6167, 0.9716, 0.9826, 0.9842, 0.98475, 0.98507, 0.98529, 0.98534]
+kag = [np.nan, np.nan, 0.98881, 0.99045, 0.99084, 0.99109, 0.99117, 0.99126]
+fig, ax = plt.subplots(figsize=(5.6, 2.6))
 xs = np.arange(1, len(steps))
 ax.plot(xs, cv[1:], "o-", color=BLUE, label="time-blocked CV (OOF)")
 ax.plot(xs, kag[1:], "s-", color=ORANGE, label="Kaggle public LB")
-ax.set_xticks(xs, steps[1:], rotation=20)
+ax.set_xticks(xs, steps[1:], rotation=30, ha="right")
 ax.set_ylabel("micro ROC-AUC")
 ax.legend(frameon=False)
 fig.savefig(OUT / "progress.pdf")
 plt.close(fig)
 
 # 5) Feature importance (gain) of the final feature set, fold 3 model
-X, names, _ = build(use_future_vol=False, cross_plant=True)
+X, names, _ = build(use_future_vol=False, cross_plant=True, topo2=True)
 n, U, H = y.shape
 case_of_row = np.repeat(np.arange(n), U * H)
 f3 = list(folds(a["start"], tr, which=[3]))[0]

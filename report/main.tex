@@ -30,14 +30,16 @@
 \begin{abstract}
 We predict, for each of the 14 generating units of the Tokke--Vinje hydropower system and each hour of a
 one-week scheduling horizon, the probability that the unit is committed (on) in the solution of the SHOP
-optimiser. Our final model is a blend of four LightGBM models trained on a long-format table with one row per
-(case, unit, hour) and 180--207 engineered features. The decisive features encode the plant economics: the
-hourly price relative to the water value of the reservoir feeding the unit, and the length of the
-contiguous period during which that ratio stays above one, a proxy for start-up and shut-down costs.
-With a time-blocked, purged cross-validation the blend reaches a micro ROC-AUC of 0.9844 out of fold and
-0.99045 on the public Kaggle leaderboard. We also report the ideas that did \emph{not} work
-(sequence neural networks, stacking across units and cases, pseudo-labelling, using future reservoir volumes)
-and why.
+optimiser. Our final model is a blend of four LightGBM and two XGBoost models trained on a long-format table
+with one row per (case, unit, hour) and 157--224 engineered features. The decisive features encode the plant
+economics: the hourly price relative to the water value of the reservoir feeding the unit, and the length of
+the contiguous period during which that ratio stays above one, a proxy for start-up and shut-down costs.
+A second step came from reading the topology more carefully: several plants draw from a tiny head pond that is
+fed by, or tunnel-connected to, a much larger lake, and describing the storage of that \emph{effective}
+reservoir group added another $+0.0006$. With a time-blocked, purged cross-validation the blend reaches a
+micro ROC-AUC of 0.9853 out of fold and 0.99126 on the public Kaggle leaderboard. We also report the ideas
+that did \emph{not} work (sequence neural networks, stacking across units and cases, a separate week-level
+model, pseudo-labelling, using future reservoir volumes) and why.
 \end{abstract}
 
 %=====================================================================
@@ -70,25 +72,33 @@ day $7$ being the end of the horizon), constraints, and labels $14\times168$. Th
 
 \paragraph{Topology.} From the connection list we derived, for each plant, the reservoir(s) it draws from and
 the reservoir it releases into (\cref{tab:topo}). This mapping is the backbone of the feature engineering.
+The immediate intake is not always where the water is stored. Haukeli's intake Vatjern holds only
+0.3\,Mm$^3$ and is fed by the river from Langeidvatn (32\,Mm$^3$); Vaamarvatn (Vinje) is joined to Totak
+(258\,Mm$^3$) and Foersvatn (Kjela) to Bordalsvatn by tunnels with equal start and end height, so their levels
+move together; Kjelavatn (Vesle Kjela) is fed by Staavatn. We call the intake plus these lakes the
+\emph{effective upstream storage} of a plant (last column of \cref{tab:topo}).
 
 \begin{table}[ht]
-\centering\small
+\centering\footnotesize
 \caption{Plants, units and their reservoirs (from \code{Tokke_Vinje_topology.yaml}). $q_{\max}$ is the largest
-turbine discharge on the efficiency curves.}
+turbine discharge on the efficiency curves. Last column: effective upstream storage used by the
+\code{--topo2} features.}
 \label{tab:topo}
-\begin{tabular}{lcllrr}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcllrrl}
 \toprule
-Plant & Units & Upstream reservoir(s) & Releases into & $P_{\max}$ [MW/unit] & $q_{\max}$ [m$^3$/s/unit]\\
+Plant & Units & Intake & Releases into & $P_{\max}$ & $q_{\max}$ & Effective upstream storage\\
+ & & & & [MW] & [m$^3$/s] & \\
 \midrule
-Tokke       & 4 & Vinjevatn              & Bandak      & 107.5 & 32\\
-Vinje       & 3 & Vaamarvatn             & Vinjevatn   & 100   & 55\\
-Songa       & 1 & Songavatn, Bitdalsvatn & Totak       & 120   & 52\\
-Kjela       & 1 & Foersvatn              & Hyljelihyl  & 60    & 40\\
-Lio         & 1 & Byrtevatn              & river       & 43    & 14\\
-Byrte       & 1 & Botnedalsvatn          & Byrtevatn   & 20    & 8\\
-Hogga       & 1 & Bandak                 & --          & 17    & 168.6\\
-Vesle Kjela & 1 & Kjelavatn              & Foersvatn   & 8.5   & 20\\
-Haukeli     & 1 & Vatjern                & Vinjevatn   & 4.9   & 2.1\\
+Tokke       & 4 & Vinjevatn              & Bandak      & 107.5 & 32    & Vinjevatn, Totak, Vaamarv., Venemo\\
+Vinje       & 3 & Vaamarvatn             & Vinjevatn   & 100   & 55    & Totak, Vaamarvatn\\
+Songa       & 1 & Songavatn, Bitdalsvatn & Totak       & 120   & 52    & (same)\\
+Kjela       & 1 & Foersvatn              & Hyljelihyl  & 60    & 40    & Foersvatn, Bordalsvatn\\
+Lio         & 1 & Byrtevatn              & river       & 43    & 14    & (same)\\
+Byrte       & 1 & Botnedalsvatn          & Byrtevatn   & 20    & 8     & (same)\\
+Hogga       & 1 & Bandak                 & --          & 17    & 168.6 & (same)\\
+Vesle Kjela & 1 & Kjelavatn              & Foersvatn   & 8.5   & 20    & Kjelavatn, Staavatn\\
+Haukeli     & 1 & Vatjern                & Vinjevatn   & 4.9   & 2.1   & Langeidvatn, Vatjern\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -138,8 +148,10 @@ experiments we trained on a 20\% row subsample with a higher learning rate and e
 (2019--22); repeating such a run with another seed moved the scores by about $\pm0.0005$, which sets the
 threshold for calling an idea an improvement.
 
-The CV turned out to be a reliable guide: the gain from \code{gbm_v2} to the blend was $+0.0016$ both out of
-fold and on the public leaderboard (\cref{fig:progress}).
+The repeated runs of the final setting showed that a single fold can move by up to $\pm0.001$ with the
+row subsample alone, so we only adopted changes that improved several folds at once. The CV turned out to be
+a reliable guide: over seven submissions every OOF gain reappeared on the public leaderboard with about the
+same size (\cref{fig:progress}), from \code{gbm_v2} (0.9826 / 0.98881) to the final blend (0.9853 / 0.99126).
 
 %=====================================================================
 \section{Feature engineering}
@@ -170,8 +182,15 @@ was introduced is given in brackets).
   \item[Water balance (v4/v5).] Filling of the upstream and downstream reservoir if the unit does not release
   (initial volume plus cumulative natural inflow, optionally plus the maximal discharge of the plants feeding
   it), hours until full, hours to empty the reservoir at full discharge, room left downstream.
-  \item[Cross-plant (v4 only).] Every plant's price/water-value ratio and run length at hour $t$, visible to
+  \item[Cross-plant (v4, v7, v9).] Every plant's price/water-value ratio and run length at hour $t$, visible to
   every unit, to let e.g.\ Hogga see what Tokke is likely to do.
+  \item[Effective upstream storage (v6--v9, \code{--topo2}).] For the reservoir group of \cref{tab:topo}:
+  initial filling, capacity-weighted end-of-horizon water value (relative to the mean price and to the intake's
+  water value), weekly inflow relative to capacity, hours until full, filling trajectory without release, and
+  price over the group's water value with its share above one and run length.
+  \item[Effective downstream storage (v7, v8, \code{--dn2}).] The same for the lakes the discharge ends up in
+  (e.g.\ Hyljelihyl and Venemo for Kjela, Vinjevatn and Bandak for Vinje), plus price against the water-value
+  difference between the two groups. It did not improve a single model but adds diversity to the blend.
 \end{description}
 
 \paragraph{Future volumes were deliberately excluded.} The volume table also contains the storage on days
@@ -187,11 +206,18 @@ the SHOP solution we predict, and they act as noise.
 rows per leaf, feature fraction 0.5, bagging 0.7, $L_2=10$, learning rate 0.05, early stopping on the
 validation fold (150 rounds), 30--40\% row subsampling to fit in 30\,GB of RAM. The test model is refit on all
 training cases with $1.1\times$ the mean best iteration. A single model trains in 15--25 minutes on 8 CPU cores.
-We also used an Azure ML cluster (8 vCPU, student subscription) to run one of the full trainings in parallel.
+We ran half of the full trainings in parallel on an Azure ML cluster (one 16-vCPU F16s\_v2 node, student
+subscription, scaled to zero when idle).
 
-\paragraph{Ensemble.} Four GBMs that differ in feature set (v2, v3, v4, v5; \cref{tab:main}) were
-averaged in logit space with weights $0.4/0.1/0.3/0.2$ found by a grid search on the OOF predictions; equal
-weights give practically the same score (0.98431).
+\paragraph{XGBoost.} The same table and the same hyper-parameters translated to XGBoost~\cite{xgboost}
+(histogram method, loss-guided growth with 255 leaves, \code{min_child_weight} 20) scored higher than
+LightGBM on identical features (0.9827 vs.\ 0.9821 on 2019--22) and stops after two to three times as many
+trees. The two XGBoost models together get 40\% of the final blend weight.
+
+\paragraph{Ensemble.} Logit averages of models that differ in library, feature set and seed. With more than
+five candidates the grid search on the simplex becomes too slow, so we used greedy ensemble selection
+(20 steps, with replacement) on the OOF predictions. The final weights are
+v2 0.30, v7 0.15, v8 0.10, v9 0.05, XGB v1 0.15, XGB v2 0.25; equal weights over the same models give 0.9851.
 
 \paragraph{Neural networks (not used in the final submission).} (i) A transformer over the 168 hours of a case
 with static context and a $14\times168$ output head, from raw inputs: 0.914 on 2021--22.
@@ -201,7 +227,7 @@ overfit the 2\,922 weeks. In a blend with the GBM they add at most $+0.0008$, an
 available in our quota) each fold took about 20 minutes, which ruled out further tuning.
 
 %=====================================================================
-\section{Results}
+\section{Results}\label{sec:results}
 %=====================================================================
 
 \begin{table}[ht]
@@ -218,9 +244,19 @@ GBM v2 (+ plant economics)            & 157 & 0.9861 & 0.9840 & 0.9745 & 0.9850 
 GBM v3 (+ run lengths)                & 172 & 0.9863 & 0.9836 & 0.9750 & 0.9863 & 0.9833 & --\\
 GBM v4 (+ water bal., cross-plant)    & 207 & 0.9874 & 0.9842 & 0.9702 & 0.9875 & 0.9830 & --\\
 GBM v5 (+ water balance)              & 180 & 0.9871 & 0.9843 & 0.9745 & 0.9860 & 0.9835 & --\\
+GBM v6 (v5 + eff.\ upstream)          & 189 & 0.9879 & 0.9846 & 0.9751 & 0.9867 & 0.9841 & --\\
+GBM v7 (v4 + eff.\ up-/downstream)    & 224 & 0.9883 & 0.9849 & 0.9730 & 0.9879 & 0.9841 & --\\
+GBM v8 (v5 + eff.\ up-/downstream)    & 197 & 0.9876 & 0.9844 & 0.9759 & 0.9873 & 0.9842 & --\\
+GBM v9 (v4 + eff.\ upstream, lr 0.03) & 216 & 0.9882 & 0.9852 & 0.9734 & 0.9883 & 0.9842 & --\\
+XGB v1 (features of v6)               & 189 & 0.9884 & 0.9851 & 0.9775 & 0.9871 & 0.9842 & --\\
+XGB v2 (features of v7)               & 224 & 0.9884 & 0.9854 & 0.9761 & 0.9879 & 0.9845 & --\\
 \midrule
-Blend v2 + v4                         &     & 0.9873 & 0.9846 & 0.9757 & 0.9871 & 0.9842 & \textbf{0.99045}\\
-Blend v2 + v3 + v4 + v5               &     & 0.9873 & 0.9847 & 0.9763 & 0.9870 & \textbf{0.9844} & 0.99043\\
+Blend v2 + v4                         &     & 0.9873 & 0.9846 & 0.9757 & 0.9871 & 0.9842 & 0.99045\\
+Blend v2 + v3 + v4 + v5               &     & 0.9873 & 0.9847 & 0.9763 & 0.9870 & 0.9844 & 0.99043\\
+Blend v2 + v4 + v6                    &     & 0.9879 & 0.9849 & 0.9768 & 0.9873 & 0.9848 & 0.99084\\
+Blend v2 + v6 + v7 + v8               &     & 0.9882 & 0.9851 & 0.9770 & 0.9879 & 0.9851 & 0.99109\\
+Blend v2 + v7 + v8 + v9 + XGB v1      &     & 0.9884 & 0.9854 & 0.9778 & 0.9880 & 0.9853 & 0.99117\\
+\textbf{Final:} above + XGB v2         &     & 0.9885 & 0.9855 & 0.9781 & 0.9880 & \textbf{0.9853} & \textbf{0.99126}\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -259,16 +295,32 @@ Per-unit logit recalibration & 0.9837 vs.\ 0.9844 & \negv\\
 Pseudo-labelling the unlabeled period & matches its teacher; $+0.00005$ in blend & \neu\\
 Transformer / TCN sequence models & 0.914 / 0.957 alone; $\le+0.0008$ in blend & \negv\\
 Ensembling GBMs with different feature sets & OOF 0.9835 (best single) $\to$ 0.9844; Kaggle $+0.0016$ & \pos\\
+\midrule
+\multicolumn{3}{l}{\emph{Second round (full-quality setting, compared with v5 on the same seed)}}\\
+Lower learning rate (0.05 $\to$ 0.02) & 0.9810 $\to$ 0.9813 alone; $\pm0$ in blend & \neu\\
+Twice as many training rows (30\% $\to$ 60\%) & 0.9810 $\to$ 0.9809 & \negv\\
+Effective upstream storage (\code{--topo2}) & 0.9745 / 0.9860 $\to$ 0.9764 / 0.9868; full OOF 0.9835 $\to$ 0.9841 & \pos\\
+Effective downstream storage (\code{--dn2}) & 0.9821 $\to$ 0.9816 alone; useful in blend & \neu\ (diversity)\\
+XGBoost instead of LightGBM & 0.9821 $\to$ 0.9827; +0.0002 in blend & \pos\\
+Average with the overlapping cases (same wall-clock hour) & 0.9844 $\to$ 0.9836 at weight 0.2, worse above & \negv\\
+Week-level model re-levelling the hourly logits & 0.9844 $\to$ 0.9843 at weight 0.1, worse above & \negv\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Error analysis.} \Cref{fig:breakdown} breaks the OOF score down. The weakest units are Haukeli
-(4.9\,MW, tiny head reservoir Vatjern whose storage is not even recorded), Vinje G3 (the third unit,
-started only when G1 and G2 are not enough) and Hogga (driven by the water Tokke releases into Bandak). All
-three depend on what \emph{other} units do, which the model only sees indirectly. 2020, a year with
-exceptionally low prices and high inflow, is clearly the hardest. Within mixed weeks the model ranks hours only
-slightly better than the price rank alone, so the remaining errors are mostly about where blocks start and end.
+\paragraph{Error analysis.} \Cref{fig:breakdown} breaks the OOF score down. The weakest units are Vinje G3
+(the third unit, started only when G1 and G2 are not enough), Haukeli (4.9\,MW) and Hogga (driven by the water
+Tokke releases into Bandak). Haukeli gained most from the effective-storage features (0.9605 $\to$ 0.9667):
+its intake Vatjern is too small to store anything, and what matters is how full Langeidvatn is. 2020, a year
+with exceptionally low prices and high inflow, is clearly the hardest.
+
+\emph{Where is the remaining error?} If we shift each (case, unit) row of the blend's logits so that its mean
+probability equals the true share of on-hours in that week, and keep the predicted order of the hours, the
+OOF AUC rises from 0.9844 to 0.9971. Almost all of the remaining error is therefore in \emph{how much} a unit
+runs in a week, not \emph{when}. The mean absolute error of the predicted weekly share is 0.065, and it is
+largest for weeks in which the unit runs 25--75\% of the time (0.14). A dedicated week-level model
+(one row per case and unit, 434 weekly aggregates) predicted the share worse (0.079) than the hourly blend,
+and mixing it in did not help (\cref{tab:ablation}).
 
 \begin{figure}[ht]
 \centering
@@ -278,15 +330,17 @@ slightly better than the price rank alone, so the remaining errors are mostly ab
 \end{figure}
 
 \paragraph{Model interpretation.} \Cref{fig:importance} shows the split-gain importance. The model is dominated
-by \code{p_over_upwv} and the run length \code{seg_up_len}, followed by the unit identity and the
-``need rank''. Physically this means: a unit runs when power is worth more than the water it uses, and only if
-that holds long enough to pay for starting it. Cross-plant ratios of the two big plants (Tokke, Vinje) and the
-water value of the small Vinjevatn reservoir, where both plants meet, are the next most informative signals.
+by the run length \code{seg_up_len} and \code{p_over_upwv}, followed by the unit identity, Tokke's price
+ratio (a cross-plant feature) and the ``need rank''. Physically this means: a unit runs when power is worth more
+than the water it uses, and only if that holds long enough to pay for starting it. The water value of the
+effective upstream storage (\code{up2_wv7rel}, \code{up2_p_over_wv}) comes right after, ahead of the water
+value of the small Vinjevatn reservoir where Tokke, Vinje and Haukeli meet.
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=.55\linewidth]{figures/importance.pdf}
-\caption{Top-20 features by LightGBM split gain (v4 feature set, model trained on 2015--20).}
+\caption{Top-20 features by LightGBM split gain (v9 feature set: cross-plant and effective upstream storage;
+model trained on 2015--20).}
 \label{fig:importance}
 \end{figure}
 
@@ -298,7 +352,10 @@ water value of the small Vinjevatn reservoir, where both plants meet, are the ne
   the watercourse, and our attempts to model this (stacking, cross-plant features, joint neural networks) either
   overfit or did not transfer across years. A joint sequence model trained on a GPU is the most promising
   direction we could not explore properly.
-  \item \textbf{Distribution shift.} Year-to-year scores range from 0.961 (2020) to 0.989; the private
+  \item \textbf{Weekly level.} The order of the hours within a week is almost solved; the open problem is the
+  number of hours each unit runs (\cref{sec:results}). That number follows from the water budget of the whole
+  watercourse over the horizon, which per-hour features describe only approximately.
+  \item \textbf{Distribution shift.} Year-to-year scores range from 0.965 (2020) to 0.989; the private
   leaderboard (2024) may therefore differ from the public one.
   \item \textbf{Irreducible variability.} Overlapping cases agree only 88\% on the same hour. Part of the
   remaining error is due to the optimiser's sensitivity to the horizon end and to near-equivalent MIP solutions.
@@ -309,15 +366,20 @@ water value of the small Vinjevatn reservoir, where both plants meet, are the ne
 %=====================================================================
 Feature engineering grounded in the physics and economics of the watercourse was what moved the score:
 expressing the price relative to the water value of the reservoir that feeds each unit (0.9716 $\to$ 0.9826)
-and adding the length of the profitable period (0.9833). A blend of gradient-boosting models with different
-feature sets gave the final 0.9844 OOF / 0.99045 public AUC. A purged, time-blocked validation was essential:
-it predicted the leaderboard gains exactly and let us reject many attractive but useless ideas.
+and adding the length of the profitable period (0.9833). Describing the storage that each plant really draws
+from, instead of its immediate intake, gave the best single LightGBM model (0.9841). A blend of LightGBM and
+XGBoost models with different feature sets gave the final 0.9853 OOF / 0.99126 public AUC. Tuning
+(learning rate, more rows, more regularisation) and post-processing did not help. A purged, time-blocked
+validation was essential: it predicted the leaderboard gains and let us reject many attractive but useless
+ideas.
 
 \paragraph{Reproducibility.} All code is in \code{src/}; see \cref{app:repro}.
 
 \begin{thebibliography}{9}
 \bibitem{lightgbm} G.~Ke et al., ``LightGBM: A highly efficient gradient boosting decision tree,'' in
 \emph{Advances in Neural Information Processing Systems 30}, 2017.
+\bibitem{xgboost} T.~Chen and C.~Guestrin, ``XGBoost: A scalable tree boosting system,'' in \emph{Proc.\ 22nd ACM
+SIGKDD}, 2016.
 \bibitem{shop} SINTEF Energy Research, \emph{SHOP --- Short-term Hydro Operation Planning, documentation},
 \url{https://docs.shop.sintef.energy}.
 \end{thebibliography}
@@ -328,19 +390,21 @@ it predicted the leaderboard gains exactly and let us reject many attractive but
 \begin{verbatim}
 uv venv --python 3.12 .venv
 uv pip install --python .venv pandas numpy scikit-learn lightgbm \
-    pyyaml pyarrow matplotlib
+    xgboost pyyaml pyarrow matplotlib
 .venv/bin/python src/data.py               # build cache/cases.npz
 # gbm_v2 was trained before later feature groups were added (commit b3d90c8)
-.venv/bin/python src/train_gbm.py --name gbm_v3 --sub 0.3 \
-    --no-future-vol --no-cross --full
-.venv/bin/python src/train_gbm.py --name gbm_v4 --sub 0.3 \
-    --no-future-vol --full --seed 4
-.venv/bin/python src/train_gbm.py --name gbm_v5 --sub 0.3 \
-    --no-future-vol --no-cross --full --seed 5
-.venv/bin/python src/blend.py gbm_v2 gbm_v3 gbm_v4 gbm_v5    # weights on OOF
-.venv/bin/python src/submit.py gbm_v2:0.4 gbm_v3:0.1 gbm_v4:0.3 \
-    gbm_v5:0.2 --out submissions/blend4.csv
+T=".venv/bin/python src/train_gbm.py --sub 0.3 --no-future-vol --full"
+$T --name gbm_v7 --topo2 --dn2 --seed 4
+$T --name gbm_v8 --topo2 --dn2 --no-cross --seed 7
+$T --name gbm_v9 --topo2 --lr 0.03 --rounds 5000 --seed 9
+$T --name xgb_v1 --algo xgb --topo2 --no-cross --seed 5
+$T --name xgb_v2 --algo xgb --topo2 --dn2 --seed 11
+.venv/bin/python src/blend.py --greedy gbm_v2 gbm_v7 gbm_v8 \
+    gbm_v9 xgb_v1 xgb_v2                    # weights on OOF
+.venv/bin/python src/submit.py gbm_v2:0.3 gbm_v7:0.15 gbm_v8:0.1 \
+    gbm_v9:0.05 xgb_v1:0.15 xgb_v2:0.25 --out submissions/blend_final.csv
 .venv/bin/python report/make_figures.py    # figures of this report
+# Azure ML: az ml job create -f azure/v7_job.yml (same for v9, xgb2)
 \end{verbatim}
 \end{footnotesize}
 
