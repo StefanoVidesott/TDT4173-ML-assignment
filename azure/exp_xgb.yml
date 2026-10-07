@@ -1,0 +1,11 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: ..
+command: >-
+  PREDS_DIR=./outputs python src/train_gbm.py --algo xgb --topo2 --name exp_xgb --folds 2,3 --sub 0.3 --lr 0.05
+  --no-future-vol --no-cross --seed 5
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04
+  conda_file: env.yml
+compute: azureml:cpu16
+experiment_name: sintef-uc
+display_name: exp_xgb

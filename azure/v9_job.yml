@@ -1,0 +1,11 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: ..
+command: >-
+  PREDS_DIR=./outputs python src/train_gbm.py --name gbm_v9 --sub 0.3 --lr 0.03 --rounds 5000 --topo2 --full
+  --no-future-vol --seed 9
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04
+  conda_file: env.yml
+compute: azureml:cpu16
+experiment_name: sintef-uc
+display_name: gbm_v9_full

@@ -54,7 +54,31 @@ def _window(x, w, forward):
     return st.max(0), st.min(0)
 
 
-def build(use_future_vol=True, cross_plant=True, context=False):
+# plant -> reservoirs that effectively hold its water (see data/extended/Tokke_Vinje_topology.yaml)
+UP2 = {
+    "Haukeli": ["Langeidvatn", "Vatjern"],
+    "Vinje": ["Totak", "Vaamarvatn"],
+    "Kjela": ["Foersvatn", "Bordalsvatn"],
+    "Vesle Kjela": ["Kjelavatn", "Staavatn"],
+    "Tokke": ["Vinjevatn", "Totak", "Vaamarvatn", "Venemo"],
+    "Hogga": ["Bandak"],
+    "Songa": ["Songavatn", "Bitdalsvatn"],
+    "Byrte": ["Botnedalsvatn"],
+    "Lio": ["Byrtevatn"],
+}
+# plant -> reservoirs its discharge effectively ends up in (Hyljelihyl and Vinjevatn are small pass-through ponds)
+DN2 = {
+    "Tokke": ["Bandak"],
+    "Byrte": ["Byrtevatn"],
+    "Vinje": ["Vinjevatn", "Bandak"],
+    "Haukeli": ["Vinjevatn", "Bandak"],
+    "Songa": ["Totak", "Vaamarvatn"],
+    "Kjela": ["Hyljelihyl", "Venemo"],
+    "Vesle Kjela": ["Foersvatn", "Bordalsvatn"],
+}
+
+
+def build(use_future_vol=True, cross_plant=True, context=False, topo2=False, dn2=False):
     a = load_cases()
     n = len(a["price"])
     units = list(a["units"])
@@ -237,6 +261,57 @@ def build(use_future_vol=True, cross_plant=True, context=False):
             uh["dn_fill_t"][:, k] = (vol[:, j, 0][:, None] + dnat) / vmax[j]
             uh["dn_fill_feed_t"][:, k] = (vol[:, j, 0][:, None] + dnat + dfeed * m3h * cum_t) / vmax[j]
             uf["dn_room_hours"][:, k] = np.clip((vmax[j] - vol[:, j, 0]) / (dfeed * m3h), 0, 5000)
+
+    # effective upstream storage: tiny head ponds are fed by bigger lakes (Vatjern <- Langeidvatn) and some intakes
+    # share their level with a big lake through an equal-height tunnel (Vaamarvatn ~ Totak, Foersvatn ~ Bordalsvatn)
+    if topo2:
+        for name in ["up2_vfrac0", "up2_wv7rel", "up2_infl_rel", "up2_hours_to_full", "up2_frac_up_100",
+                     "up2_wv7_m_up", "dn2_wv7rel", "dn2_vfrac0", "dn2_infl_rel", "d2_frac"]:
+            uf[name] = np.zeros((n, U), np.float32)
+        for name in ["up2_p_over_wv", "up2_seg_len", "up2_fill_t", "d2_p_over", "d2_p_m_z", "d2_seg_len",
+                     "dn2_fill_t"]:
+            uh[name] = np.zeros((n, U, H), np.float32)
+        if not dn2:
+            for name in ["dn2_wv7rel", "dn2_vfrac0", "dn2_infl_rel", "d2_frac", "d2_p_over", "d2_p_m_z", "d2_seg_len",
+                         "dn2_fill_t"]:
+                (uf if name in uf else uh).pop(name)
+        for k, u in enumerate(units):
+            group = UP2.get(u.rsplit("_", 1)[0])
+            if not group:
+                continue
+            ig = [ri[r] for r in group]
+            vm, v0 = vmax[ig].sum(), vol[:, ig, 0].sum(1)
+            w2 = (wv[:, ig, 7] * vmax[ig]).sum(1) / vm                     # capacity-weighted water value
+            nat = np.cumsum(infl[:, [infl_names.index(r) for r in group]].sum(1), 1) * 3600 / 1e6
+            r2 = P / (np.abs(w2[:, None]) + 1)
+            uf["up2_vfrac0"][:, k] = v0 / vm
+            uf["up2_wv7rel"][:, k] = w2 / (np.abs(pm[:, 0]) + 1)
+            uf["up2_wv7_m_up"][:, k] = w2 - uf["up_wv7"][:, k]
+            uf["up2_infl_rel"][:, k] = nat[:, -1] / vm
+            uf["up2_hours_to_full"][:, k] = np.clip((vm - v0) / (nat[:, -1] / H + 1e-4), 0, 2000)
+            uf["up2_frac_up_100"][:, k] = (r2 > 1).mean(1)
+            uh["up2_p_over_wv"][:, k] = r2
+            uh["up2_seg_len"][:, k] = _segments(r2 > 1)[0]
+            uh["up2_fill_t"][:, k] = (v0[:, None] + nat) / vm
+            dg = DN2.get(u.rsplit("_", 1)[0], []) if dn2 else []
+            if dg:
+                jd = [ri[r] for r in dg]
+                dvm, dv0 = vmax[jd].sum(), vol[:, jd, 0].sum(1)
+                dw = (wv[:, jd, 7] * vmax[jd]).sum(1) / dvm
+                dnat = np.cumsum(infl[:, [infl_names.index(r) for r in dg]].sum(1), 1) * 3600 / 1e6
+                uf["dn2_wv7rel"][:, k] = dw / (np.abs(pm[:, 0]) + 1)
+                uf["dn2_vfrac0"][:, k] = dv0 / dvm
+                uf["dn2_infl_rel"][:, k] = dnat[:, -1] / dvm
+                uh["dn2_fill_t"][:, k] = (dv0[:, None] + dnat) / dvm
+            else:
+                dw = np.zeros(n, np.float32)
+            if not dn2:
+                continue
+            d2 = (w2 - dw)[:, None]
+            uh["d2_p_over"][:, k] = P / (np.abs(d2) + 1)
+            uh["d2_p_m_z"][:, k] = (P - d2) / ps
+            uh["d2_seg_len"][:, k] = _segments(P > d2)[0]
+            uf["d2_frac"][:, k] = (P > d2).mean(1)
 
     # every plant's economics at hour t, visible to every unit (plants are coupled through the watercourse)
     first_unit = {}
